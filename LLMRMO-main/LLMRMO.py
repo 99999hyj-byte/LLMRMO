@@ -11,47 +11,102 @@ from openai import OpenAI
 # Initialize OpenAI client 
 client = OpenAI(api_key="YOUR_OPENAI_API_KEY")
 
+
 def llm_local_decision(v, candidates, G):
     """
-    Phase 1 LLM based local decision
-    Utilizing semantic reasoning to evaluate candidate node affiliation
+    Phase 1: LLM-based local community center identification.
+
+    The structured prompt follows Eq. (3) in the LLMRMO paper:
+        P(s, N_tilde_s) = q_task + phi_s + sum(phi_i)
+
+    Source node description:
+        Source node ID, degree, full neighbor list,
+        and selected candidate neighbors.
+
+    Candidate node description:
+        Candidate node ID, degree, and full neighbor list.
     """
-    v_degree = G.degree(v)
-    
-    # Construct structured prompts 
-    prompt = (
-        "### Task Description\n"
-        "In network community detection identify potential community center nodes Decision logic as follows\n"
-        "- Centrality Community centers are usually nodes with higher degrees\n"
-        "- Affiliation Candidates with more common neighbors with the source node represent a stronger likelihood of belonging to the same community\n"
-        "Select the most suitable target node as the community center based on node information\n"
-        "If no neighbor is more suitable select the source node itself as the center\n\n"
-        f"Source node {v} degree {v_degree} candidate neighbor count {len(candidates)}\n"
-        "Candidate neighbor detailed information\n"
-    )
 
-    for nn in candidates:
-        nn_degree = G.degree(nn)
-        common_neighbors = set(G.neighbors(v)) & set(G.neighbors(nn))
-        prompt += (
-            f"Node {nn} degree {nn_degree} "
-            f"Common neighbors with source node {len(common_neighbors)} "
-            f"Represents strong community affiliation with source node\n"
-        )
+    # Full neighborhood of the source node
+    source_neighbors = sorted(G.neighbors(v), key=str)
 
-    prompt += "\nOutput requirement Only return a single number representing the target node ID"
+    # PageRank-selected candidate neighbors
+    candidate_neighbors = list(candidates)
 
-    # Use the specified LLM component 
+    # Structured task query
+    prompt_parts = [
+        "### Task Description",
+        "You are performing community detection in an undirected network.",
+        "Your task is to identify the local community center for the given source node.",
+        (
+            "A community center is a node that is structurally influential "
+            "within its local neighborhood and can serve as a local leader "
+            "for neighboring nodes."
+        ),
+        (
+            "Use the supplied node degrees and neighborhood lists to assess "
+            "the local structural relationships. Consider both the source "
+            "node and all listed candidate neighbors."
+        ),
+        "",
+        "### Source Node Description",
+        f"Source node: {v}",
+        f"Degree: {G.degree(v)}",
+        f"Neighbors: {source_neighbors}",
+        f"Selected candidate neighbors: {candidate_neighbors}",
+        "",
+        "### Candidate Node Descriptions",
+    ]
+
+    # Describe each candidate using its degree and complete neighbor list
+    for node in candidate_neighbors:
+        node_neighbors = sorted(G.neighbors(node), key=str)
+
+        prompt_parts.extend([
+            f"Candidate node: {node}",
+            f"Degree: {G.degree(node)}",
+            f"Neighbors: {node_neighbors}",
+            "",
+        ])
+
+    # Task query consistent with the paper
+    prompt_parts.extend([
+        "### Question",
+        (
+            "Which node, including the source node itself and the listed "
+            "candidate neighbors, is most likely to serve as the local "
+            "community center?"
+        ),
+        "",
+        "### Output Requirement",
+        (
+            "Return only the ID of one node: either the source node itself "
+            "or one of the listed candidate neighbors. Do not provide "
+            "any explanation or additional text."
+        ),
+    ])
+
+    prompt = "\n".join(prompt_parts)
     response = client.chat.completions.create(
-        model="gpt-4o", 
+        model="LLama3_1",
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.1 
+        temperature=0.1,
     )
-    
+    # Validate the output to ensure that it is a permitted node
     try:
-        return int(response.choices[0].message.content.strip())
-    except:
-        return v
+        output = response.choices[0].message.content.strip()
+        selected_node = int(output)
+
+        valid_nodes = {v, *candidates}
+        if selected_node in valid_nodes:
+            return selected_node
+
+    except (ValueError, TypeError, AttributeError):
+        pass
+
+    # Fallback when the output is invalid
+    return v
+
 
 def build_llm_hierarchy(G, k=30):
     """
